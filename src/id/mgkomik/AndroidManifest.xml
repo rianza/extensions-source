@@ -15,6 +15,7 @@
                 <data android:scheme="https" />
                 <data android:host="web.mgkomik.cc" />
                 <data android:pathPrefix="/komik" />
+                <data android:pathPrefix="/manga" />
             </intent-filter>
         </activity>
     </application>

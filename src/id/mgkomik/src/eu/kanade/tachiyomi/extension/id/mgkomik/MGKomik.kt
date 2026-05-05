@@ -13,6 +13,8 @@ import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
 import java.lang.UnsupportedOperationException
+import java.text.SimpleDateFormat
+import java.util.Locale
 import kotlin.time.Duration.Companion.minutes
 
 class MGKomik : HttpSource() {
@@ -30,6 +32,8 @@ class MGKomik : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
 
+    private val dateFormat = SimpleDateFormat("MMMM d, yyyy", Locale("id"))
+
     override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter()))
 
     override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
@@ -42,7 +46,7 @@ class MGKomik : HttpSource() {
         if (query.isNotBlank()) {
             if (query.startsWith("https://")) {
                 val url = query.toHttpUrl()
-                if (url.host == baseUrl.toHttpUrl().host && (url.pathSegments[0] == "komik" || url.pathSegments[0] == "manga")) {
+                if (url.host == baseUrl.toHttpUrl().host && url.pathSegments.size > 1 && (url.pathSegments[0] == "komik" || url.pathSegments[0] == "manga")) {
                     val slug = url.pathSegments[1]
                     val tmpManga = SManga.create().apply {
                         this@apply.url = "/komik/$slug"
@@ -136,12 +140,19 @@ class MGKomik : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        return document.select("a[href*='/chapter/'], a[href*='/bab/'], .chapter-list a").map { element ->
+        return document.select("a[href*='/chapter/'], a[href*='/bab/'], .chapter-list a, .list-chapters a").map { element ->
             SChapter.create().apply {
                 setUrlWithoutDomain(element.absUrl("href"))
                 name = element.text().trim()
+                date_upload = parseChapterDate(element.selectFirst("span, p")?.text() ?: "")
             }
         }
+    }
+
+    private fun parseChapterDate(dateStr: String): Long = try {
+        dateFormat.parse(dateStr.trim())?.time ?: 0L
+    } catch (_: Exception) {
+        0L
     }
 
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
