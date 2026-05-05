@@ -12,8 +12,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
-import java.lang.UnsupportedOperationException
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Locale
 import kotlin.time.Duration.Companion.minutes
 
@@ -33,10 +33,10 @@ class MGKomik : HttpSource() {
         .set("Referer", "$baseUrl/")
 
     private val dateFormats = listOf(
+        SimpleDateFormat("d MMM yy", Locale.US),
+        SimpleDateFormat("d MMM yyyy", Locale.US),
         SimpleDateFormat("MMMM d, yyyy", Locale("id")),
         SimpleDateFormat("d MMMM yyyy", Locale("id")),
-        SimpleDateFormat("MMMM d, yyyy", Locale.US),
-        SimpleDateFormat("d MMMM yyyy", Locale.US),
     )
 
     override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter()))
@@ -115,7 +115,9 @@ class MGKomik : HttpSource() {
             }
         }.filter { it.title.isNotBlank() }.distinctBy { it.url }
 
-        return MangasPage(mangas, mangas.size >= 10)
+        val hasNextPage = document.selectFirst("a:contains(Next), a:contains(Berikutnya), a[href*='page=${document.location().toHttpUrl().queryParameter("page")?.toIntOrNull()?.plus(1) ?: 2}']") != null
+
+        return MangasPage(mangas, hasNextPage)
     }
 
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
@@ -133,7 +135,16 @@ class MGKomik : HttpSource() {
             thumbnail_url = document.selectFirst("img.object-cover, .aspect-video img, [class*=aspect-] img, .manga-thumbnail img")?.absUrl("src")
             author = document.selectFirst("span:contains(author:), span:contains(Penulis:) + span, .author, span:contains(Author:)")?.text()
                 ?.replace("author:", "", true)?.replace("Penulis:", "", true)?.trim()
-            description = document.select("p.line-clamp-4, .prose p, #synopsis p, .sinopsis p, .description, .manga-description").joinToString("\n") { it.text().trim() }
+
+            val descriptionElements = document.select("p.line-clamp-4, .prose p, #synopsis p, .sinopsis p, .description, .manga-description")
+            val alternativeTitle = document.selectFirst("span:contains(Alt Title:) + span, .alt-title, span:contains(Alternatif:)")?.text()?.trim()
+
+            description = buildString {
+                append(descriptionElements.joinToString("\n") { it.text().trim() })
+                if (!alternativeTitle.isNullOrBlank()) {
+                    append("\n\nAlternative Title: $alternativeTitle")
+                }
+            }
 
             val statusText = document.selectFirst(".bg-gray-100.text-gray-800, .bg-green-100, .bg-blue-100, span:contains(Status:) + span, .status, .manga-status")?.text()?.trim()
             status = when (statusText?.lowercase()) {
@@ -143,7 +154,10 @@ class MGKomik : HttpSource() {
                 else -> SManga.UNKNOWN
             }
 
-            genre = document.select(".bg-zinc-700, .bg-zinc-800, a[href*=/genre/], .genre, .manga-genre a").joinToString { it.text().trim() }
+            val type = document.selectFirst("span:contains(Type:) + span, .type, .manga-type")?.text()?.trim()
+            val genres = document.select(".bg-zinc-700, .bg-zinc-800, a[href*=/genre/], .genre, .manga-genre a").map { it.text().trim() }.toMutableList()
+            if (!type.isNullOrBlank()) genres.add(0, type)
+            genre = genres.joinToString()
         }
     }
 
@@ -154,15 +168,40 @@ class MGKomik : HttpSource() {
         return document.select("a[href*='/chapter/'], a[href*='/bab/'], .chapter-list a, .list-chapters a, .manga-chapters a").map { element ->
             SChapter.create().apply {
                 setUrlWithoutDomain(element.absUrl("href"))
-                name = element.text().trim()
-                date_upload = parseChapterDate(element.selectFirst("span, p, .chapter-date")?.text() ?: "")
+
+                // Clean chapter name by removing date text if it's in a child element
+                val dateElement = element.selectFirst("span, p, .chapter-date")
+                name = if (dateElement != null) {
+                    val dateText = dateElement.text()
+                    element.text().replace(dateText, "").trim()
+                } else {
+                    element.text().trim()
+                }
+
+                date_upload = parseChapterDate(dateElement?.text() ?: "")
             }
         }.distinctBy { it.url }
     }
 
     private fun parseChapterDate(dateStr: String): Long {
         if (dateStr.isBlank()) return 0L
-        val trimmedDate = dateStr.trim()
+        val trimmedDate = dateStr.lowercase().trim()
+
+        // Handle relative dates
+        if (trimmedDate.contains("lalu") || trimmedDate.contains("ago")) {
+            val value = trimmedDate.split(" ")[0].toIntOrNull() ?: return 0L
+            val calendar = Calendar.getInstance()
+            when {
+                trimmedDate.contains("menit") || trimmedDate.contains("minute") -> calendar.add(Calendar.MINUTE, -value)
+                trimmedDate.contains("jam") || trimmedDate.contains("hour") -> calendar.add(Calendar.HOUR_OF_DAY, -value)
+                trimmedDate.contains("hari") || trimmedDate.contains("day") -> calendar.add(Calendar.DAY_OF_YEAR, -value)
+                trimmedDate.contains("minggu") || trimmedDate.contains("week") -> calendar.add(Calendar.WEEK_OF_YEAR, -value)
+                trimmedDate.contains("bulan") || trimmedDate.contains("month") -> calendar.add(Calendar.MONTH, -value)
+                trimmedDate.contains("tahun") || trimmedDate.contains("year") -> calendar.add(Calendar.YEAR, -value)
+            }
+            return calendar.timeInMillis
+        }
+
         for (format in dateFormats) {
             try {
                 return format.parse(trimmedDate)?.time ?: continue
@@ -184,7 +223,7 @@ class MGKomik : HttpSource() {
         val document = response.asJsoup()
         return document.select("img[src*='/uploads/'], .reader-area img, .chapter-content img, .manga-reader img").mapIndexed { index, element ->
             Page(index, imageUrl = element.absUrl("src"))
-        }.filter { it.imageUrl?.isNotBlank() == true }
+        }.filter { it.imageUrl?.isNotBlank() == true }.distinctBy { it.imageUrl }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
