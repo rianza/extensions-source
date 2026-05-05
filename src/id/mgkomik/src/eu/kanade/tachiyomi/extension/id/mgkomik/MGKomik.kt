@@ -40,7 +40,7 @@ class MGKomik : HttpSource() {
         .set("Referer", "$baseUrl/")
 
     private val rscHeaders = headersBuilder()
-        .set("rsc", "1")
+        .set("Rsc", "1")
         .build()
 
     override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter()))
@@ -102,7 +102,10 @@ class MGKomik : HttpSource() {
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl/list".toHttpUrl().newBuilder().apply {
+        val url = "$baseUrl/komik".toHttpUrl().newBuilder().apply {
+            if (query.isNotBlank()) {
+                addQueryParameter("q", query.trim())
+            }
             filters.forEach { filter ->
                 when (filter) {
                     is StatusFilter -> filter.selected.takeIf { it.isNotEmpty() }?.also { status ->
@@ -180,7 +183,7 @@ class MGKomik : HttpSource() {
         }
     }
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
+    override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
 
     override fun getMangaUrl(manga: SManga): String = if (manga.url.startsWith("/komik/")) {
         baseUrl + manga.url
