@@ -94,6 +94,9 @@ class MangaDetailsDto(
     val details: MangaList.Manga? = null,
     val data: MangaList.Manga? = null,
     val record: MangaList.Manga? = null,
+    val entry: MangaList.Manga? = null,
+    val result: MangaList.Manga? = null,
+    val item: MangaList.Manga? = null,
 )
 
 @Serializable
@@ -115,6 +118,7 @@ class ChaptersList(
     val chapters: List<Chapter>? = null,
     val data: List<Chapter>? = null,
     val items: List<Chapter>? = null,
+    val records: List<Chapter>? = null,
 ) {
     @Serializable
     class Chapter(
@@ -144,7 +148,7 @@ class ChaptersList(
         }
     }
 
-    fun parseChapters() = chapters ?: data ?: items ?: emptyList()
+    fun parseChapters() = chapters ?: data ?: items ?: records ?: emptyList()
 }
 
 private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ", Locale.ROOT)

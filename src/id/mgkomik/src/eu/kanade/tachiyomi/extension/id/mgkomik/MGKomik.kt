@@ -229,80 +229,85 @@ class MGKomik : HttpSource() {
             it is JsonObject && (it.containsKey("manga") || it.containsKey("post") || it.containsKey("details") || it.containsKey("record"))
         }
 
+        val document = asJsoup(body)
+        val details = SManga.create()
+
         if (data != null) {
             val manga = data.manga ?: data.post ?: data.details ?: data.data ?: data.record
+                ?: data.entry ?: data.result ?: data.item
             if (manga != null) {
-                return manga.toSManga(baseUrl).apply {
-                    val document = asJsoup(body)
-                    if (author.isNullOrBlank()) {
-                        author = document.selectFirst("span:contains(author:) + span")?.ownText()?.trim()
-                    }
-                    if (genre.isNullOrBlank()) {
-                        genre = buildList {
-                            document.selectFirst("span:contains(type:) + span")
-                                ?.ownText()?.trim()
-                                ?.also { add(it) }
-                            document.selectFirst("span:contains(rilis:) + span")
-                                ?.ownText()?.trim()
-                                ?.also { add(it) }
-                            document.select(".bg-zinc-700").forEach {
-                                add(it.ownText().trim())
-                            }
-                        }.joinToString()
-                    }
-                    if (description.isNullOrBlank()) {
-                        description = document.select("p.line-clamp-4").joinToString("\n") { it.ownText().trim() }
-                    }
-                    if (status == SManga.UNKNOWN) {
-                        status = when (document.selectFirst(".bg-gray-100.text-gray-800")?.ownText()?.trim()) {
-                            "Ongoing" -> SManga.ONGOING
-                            "Selesai", "Completed" -> SManga.COMPLETED
-                            "Hiatus" -> SManga.ON_HIATUS
-                            else -> SManga.UNKNOWN
-                        }
-                    }
-                }
+                manga.toSManga(baseUrl).copyTo(details)
             }
         }
 
-        val document = asJsoup(body)
-
-        return SManga.create().apply {
-            val urlPath = document.selectFirst("meta[property=og:url]")?.absUrl("content")?.toHttpUrl()?.pathSegments
-            url = if (urlPath != null && urlPath.size >= 2) "/komik/${urlPath[1]}" else response.request.url.encodedPath
-
-            title = document.selectFirst("meta[property=og:title]")?.attr("content")?.removeSuffix(" - MG Komik") ?: ""
-            thumbnail_url = document.selectFirst("img.object-cover")?.absUrl("src")
-            author = document.selectFirst("span:contains(author:) + span")?.ownText()?.trim()
-            genre = buildList {
-                document.selectFirst("span:contains(type:) + span")
+        if (details.title.isBlank()) {
+            details.title = document.selectFirst("meta[property=og:title]")?.attr("content")
+                ?.removeSuffix(" - MG Komik")?.removeSuffix(" - MGKOMIK")?.trim() ?: ""
+        }
+        if (details.thumbnail_url.isNullOrBlank()) {
+            details.thumbnail_url = document.selectFirst("img.object-cover, .aspect-video img, [class*=aspect-] img")?.absUrl("src")
+        }
+        if (details.author.isNullOrBlank()) {
+            details.author = document.selectFirst("span:contains(author:), span:contains(Penulis:) + span")?.ownText()?.trim()
+                ?: document.selectFirst("span:contains(author:), span:contains(Penulis:)")?.parent()?.select("span")?.last()?.ownText()?.trim()
+        }
+        if (details.genre.isNullOrBlank()) {
+            details.genre = buildList {
+                document.selectFirst("span:contains(type:), span:contains(Tipe:) + span")
                     ?.ownText()?.trim()
                     ?.also { add(it) }
-                document.selectFirst("span:contains(rilis:) + span")
+                document.selectFirst("span:contains(rilis:), span:contains(Rilis:) + span")
                     ?.ownText()?.trim()
                     ?.also { add(it) }
-                document.select(".bg-zinc-700").forEach {
-                    add(it.ownText().trim())
+                document.select(".bg-zinc-700, .bg-zinc-800, a[href*=/genre/]").forEach {
+                    add(it.text().trim())
                 }
-            }.joinToString()
-            description = document.select("p.line-clamp-4").joinToString("\n") { it.ownText().trim() }
-            status = when (document.selectFirst(".bg-gray-100.text-gray-800")?.ownText()?.trim()) {
-                "Ongoing" -> SManga.ONGOING
-                "Selesai", "Completed" -> SManga.COMPLETED
-                "Hiatus" -> SManga.ON_HIATUS
+            }.filter { it.isNotBlank() }.distinct().joinToString()
+        }
+        if (details.description.isNullOrBlank()) {
+            details.description = document.select("p.line-clamp-4, .prose p, #synopsis p, .sinopsis p").joinToString("\n") { it.text().trim() }
+        }
+        if (details.status == SManga.UNKNOWN) {
+            val statusText = document.selectFirst(".bg-gray-100.text-gray-800, .bg-green-100, .bg-blue-100, span:contains(Status:) + span")?.text()?.trim()
+            details.status = when (statusText?.lowercase()) {
+                "ongoing", "berjalan" -> SManga.ONGOING
+                "selesai", "completed", "tamat" -> SManga.COMPLETED
+                "hiatus" -> SManga.ON_HIATUS
                 else -> SManga.UNKNOWN
             }
         }
+
+        return details
+    }
+
+    private fun SManga.copyTo(target: SManga) {
+        target.url = this.url
+        target.title = this.title
+        target.thumbnail_url = this.thumbnail_url
+        target.author = this.author
+        target.description = this.description
+        target.genre = this.genre
+        target.status = this.status
     }
 
     override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
+        val body = response.peekBody(Long.MAX_VALUE).string()
         val data = response.extractData<ChaptersList> {
-            it is JsonObject && (it.containsKey("chapters") || it.containsKey("data") || it.containsKey("items"))
+            it is JsonObject && (it.containsKey("chapters") || it.containsKey("data") || it.containsKey("items") || it.containsKey("records"))
         }
 
-        return data?.parseChapters().orEmpty().map { it.toSChapter() }
+        val chapters = data?.parseChapters().orEmpty().map { it.toSChapter() }
+        if (chapters.isNotEmpty()) return chapters
+
+        val document = asJsoup(body)
+        return document.select("a[href*=/chapter/], a[href*=/bab/]").map { element ->
+            SChapter.create().apply {
+                setUrlWithoutDomain(element.absUrl("href"))
+                name = element.text().trim()
+            }
+        }
     }
 
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
