@@ -24,9 +24,19 @@ class MangaList(
     val lastPage: Int? = null,
     @SerialName("total_pages")
     val totalPages: Int? = null,
+    val meta: Meta? = null,
 ) {
     @Serializable
+    class Meta(
+        @SerialName("current_page")
+        val currentPage: Int? = null,
+        @SerialName("last_page")
+        val lastPage: Int? = null,
+    )
+
+    @Serializable
     class Manga(
+        val id: Int? = null,
         val link: String? = null,
         val slug: String? = null,
         val url: String? = null,
@@ -54,14 +64,18 @@ class MangaList(
     ) {
         fun toSManga(baseUrl: String) = SManga.create().apply {
             val rawUrl = link ?: slug ?: url ?: tautan ?: ""
-            this.url = if (rawUrl.startsWith("http")) {
-                runCatching { rawUrl.toHttpUrl().encodedPath }.getOrDefault(rawUrl)
+            this.url = if (rawUrl.isNotEmpty()) {
+                if (rawUrl.startsWith("http")) {
+                    runCatching { rawUrl.toHttpUrl().encodedPath }.getOrDefault(rawUrl)
+                } else {
+                    rawUrl
+                }.let {
+                    it.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
+                }.let {
+                    "/komik/$it"
+                }
             } else {
-                rawUrl
-            }.let {
-                it.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
-            }.let {
-                "/komik/$it"
+                ""
             }
             this.title = (this@Manga.title ?: name ?: judul ?: "").trim()
             val rawImg = img ?: image ?: thumbnail ?: thumb ?: cover ?: gambar ?: ""
@@ -74,8 +88,8 @@ class MangaList(
             description = (this@Manga.description ?: synopsis ?: summary ?: content)?.trim()
             genre = (genres?.joinToString { it.title } ?: this@Manga.genre ?: type)?.trim()
             status = when (this@Manga.status?.lowercase()) {
-                "ongoing" -> SManga.ONGOING
-                "completed", "selesai" -> SManga.COMPLETED
+                "ongoing", "berjalan" -> SManga.ONGOING
+                "completed", "selesai", "tamat" -> SManga.COMPLETED
                 "hiatus" -> SManga.ON_HIATUS
                 else -> SManga.UNKNOWN
             }
@@ -84,7 +98,7 @@ class MangaList(
 
     fun parseMangas() = data ?: mangas ?: posts ?: items ?: entries ?: results ?: records ?: emptyList()
 
-    fun hasNextPage(page: Int) = (currentPage ?: page) < (lastPage ?: totalPages ?: page)
+    fun hasNextPage(page: Int) = (currentPage ?: meta?.currentPage ?: page) < (lastPage ?: meta?.lastPage ?: totalPages ?: page)
 }
 
 @Serializable
@@ -136,12 +150,16 @@ class ChaptersList(
     ) {
         fun toSChapter() = SChapter.create().apply {
             val rawUrl = link ?: slug ?: url ?: tautan ?: ""
-            this.url = if (rawUrl.startsWith("http")) {
-                runCatching { rawUrl.toHttpUrl().encodedPath }.getOrDefault(rawUrl)
+            this.url = if (rawUrl.isNotEmpty()) {
+                if (rawUrl.startsWith("http")) {
+                    runCatching { rawUrl.toHttpUrl().encodedPath }.getOrDefault(rawUrl)
+                } else {
+                    rawUrl
+                }.let {
+                    if (it.startsWith("/")) it else "/$it"
+                }
             } else {
-                rawUrl
-            }.let {
-                if (it.startsWith("/")) it else "/$it"
+                ""
             }
             this.name = (this@Chapter.title ?: this@Chapter.name ?: judul ?: "").trim()
             date_upload = dateFormat.tryParse(updatedAt ?: createdAt)

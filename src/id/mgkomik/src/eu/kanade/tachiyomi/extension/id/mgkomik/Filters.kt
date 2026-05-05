@@ -35,16 +35,11 @@ class SortFilter :
     SelectFilter(
         "Urutkan berdasarkan",
         arrayOf(
-            "Populer" to "popular",
+            "Populer" to "views",
             "Terbaru" to "latest",
             "A-Z" to "alphabet",
         ),
-    ) {
-    companion object {
-        const val POPULAR = "popular"
-        const val LATEST = "latest"
-    }
-}
+    )
 
 class GenreFilter(genres: List<Genre>) :
     Filter.Group<GenreCheckBox>(
