@@ -1,7 +1,10 @@
 package eu.kanade.tachiyomi.extension.id.mgkomik
 
+import android.app.Application
+import android.content.SharedPreferences
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.model.Filter
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -9,216 +12,143 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.utils.extractNextJs
-import kotlinx.serialization.json.jsonObject
+import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
-import kotlin.time.Duration.Companion.minutes
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
+import java.util.concurrent.TimeUnit
 
-class MGKomik : HttpSource() {
+class MGKomik :
+    HttpSource(),
+    ConfigurableSource {
+
     override val name = "MG Komik"
+
     override val baseUrl = "https://web.mgkomik.cc"
+
     override val lang = "id"
+
     override val supportsLatest = true
 
+    private val json: Json by lazy { Injekt.get<Json>() }
+
+    private val preferences: SharedPreferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    }
+
     override val client = network.cloudflareClient.newBuilder()
-        .connectTimeout(2.minutes)
-        .readTimeout(2.minutes)
-        .callTimeout(2.minutes)
+        .rateLimit(4)
+        .connectTimeout(2, TimeUnit.MINUTES)
+        .readTimeout(2, TimeUnit.MINUTES)
+        .callTimeout(2, TimeUnit.MINUTES)
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
+        .add("Referer", "$baseUrl/")
+        .add("Sec-Fetch-Site", "same-origin")
 
-    private val rscHeaders = headersBuilder()
-        .set("rsc", "1")
-        .build()
+    // Popular
+    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/komik/?filter=&order_by=views&page=$page", headers)
 
-    // ======================== Popular ========================
-    override fun popularMangaRequest(page: Int): Request {
-        val url = "$baseUrl/komik/".toHttpUrl().newBuilder()
-            .addQueryParameter("filter", "")
-            .addQueryParameter("order_by", "views")
-            .addQueryParameter("page", page.toString())
-            .build()
-        return GET(url, rscHeaders)
+    override fun popularMangaParse(response: Response): MangasPage {
+        val result = response.extractNextJs<MGKomikMangaListDto>()
+        val mangas = result?.data?.map {
+            SManga.create().apply {
+                url = it.slug?.removePrefix("/")?.removePrefix("komik/")?.removePrefix("manga/") ?: ""
+                title = it.title ?: ""
+                thumbnail_url = it.image
+            }
+        } ?: emptyList()
+        val hasNextPage = (result?.currentPage ?: 1) < (result?.lastPage ?: 1)
+        return MangasPage(mangas, hasNextPage)
     }
 
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
+    // Latest
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/komik/?filter=&order_by=latest&page=$page", headers)
 
-    // ======================== Latest ========================
-    override fun latestUpdatesRequest(page: Int): Request {
-        val url = "$baseUrl/komik/".toHttpUrl().newBuilder()
-            .addQueryParameter("filter", "")
-            .addQueryParameter("order_by", "latest")
-            .addQueryParameter("page", page.toString())
-            .build()
-        return GET(url, rscHeaders)
-    }
+    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
 
-    override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
-
-    // ======================== Search ========================
+    // Search
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         if (query.isNotEmpty()) {
             val url = "$baseUrl/search/".toHttpUrl().newBuilder()
                 .addQueryParameter("q", query)
                 .addQueryParameter("page", page.toString())
                 .build()
-            return GET(url, rscHeaders)
+            return GET(url, headers)
         }
 
         val url = "$baseUrl/komik/".toHttpUrl().newBuilder()
-        url.addQueryParameter("page", page.toString())
+            .addQueryParameter("filter", "")
+            .addQueryParameter("order_by", "latest")
+            .addQueryParameter("page", page.toString())
 
-        filters.forEach { filter ->
-            when (filter) {
-                is SortFilter -> url.addQueryParameter("order_by", filter.selected)
-                is StatusFilter -> url.addQueryParameter("status", filter.selected)
-                is TypeFilter -> url.addQueryParameter("type", filter.selected)
-                is GenreFilter -> {
-                    filter.state
-                        .filter { it.state }
-                        .forEach { url.addQueryParameter("genre[]", it.value) }
-                }
-                else -> {}
-            }
-        }
-
-        return GET(url.build(), rscHeaders)
+        return GET(url.build(), headers)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val data = response.extractNextJs<MangaList> {
-            val obj = it.jsonObject
-            obj.containsKey("data") || obj.containsKey("records") || obj.containsKey("items") ||
-                obj.containsKey("entries") || obj.containsKey("result") || obj.containsKey("entry") || obj.containsKey("item")
-        } ?: throw Exception("Gagal memuat daftar komik")
+    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
 
-        val mangas = data.data.map { it.toSManga() }
-        return MangasPage(mangas, data.hasNextPage())
-    }
-
-    // ======================== Details ========================
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
-
-    override fun getMangaUrl(manga: SManga): String {
+    // Details
+    override fun mangaDetailsRequest(manga: SManga): Request {
         val slug = manga.url.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
-        return "$baseUrl/komik/$slug/"
+        return GET("$baseUrl/komik/$slug/", headers)
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val data = response.extractNextJs<MangaDetails>()
-            ?: throw Exception("Gagal memuat detail komik")
+        val details = response.extractNextJs<MGKomikDetailsDto>()
 
         return SManga.create().apply {
-            val slug = response.request.url.pathSegments.getOrNull(response.request.url.pathSegments.size - 2)
-            url = slug?.removePrefix("/").orEmpty().removePrefix("komik/").removePrefix("manga/")
-            title = data.title ?: data.name ?: ""
-            thumbnail_url = data.img ?: data.image ?: data.thumbnail ?: data.cover
-            author = data.author
-            description = data.description ?: data.sinopsis
-            genre = (data.genres?.mapNotNull { it.title ?: it.name } ?: data.genresAlt)?.joinToString()
-            status = when (data.status?.lowercase()) {
-                "ongoing" -> SManga.ONGOING
-                "completed", "tamat" -> SManga.COMPLETED
-                else -> SManga.UNKNOWN
-            }
+            title = details?.title ?: ""
+            author = details?.author
+            status = parseStatus(details?.status)
+            description = details?.description
+            genre = details?.genres?.mapNotNull { it.name }?.joinToString()
+            initialized = true
         }
     }
 
-    // ======================== Chapters ========================
-    override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
+    private fun parseStatus(status: String?) = when (status?.lowercase()) {
+        "ongoing", "berjalan" -> SManga.ONGOING
+        "completed", "tamat", "selesai" -> SManga.COMPLETED
+        "on hold", "delay" -> SManga.ON_HIATUS
+        "dropped" -> SManga.CANCELLED
+        else -> SManga.UNKNOWN
+    }
+
+    // Chapters
+    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.extractNextJs<ChaptersList> {
-            val obj = it.jsonObject
-            obj.containsKey("chapters") || obj.containsKey("data") || obj.containsKey("records") || obj.containsKey("items")
-        } ?: throw Exception("Gagal memuat daftar chapter")
-
-        return data.chapters.map { it.toSChapter() }
+        val result = response.extractNextJs<MGKomikChaptersDto>()
+        return result?.chapters?.map {
+            SChapter.create().apply {
+                url = it.slug?.removePrefix("/") ?: ""
+                name = it.title ?: ""
+                date_upload = dateFormat.tryParse(it.updatedAt)
+            }
+        }?.reversed() ?: emptyList()
     }
 
-    // ======================== Pages ========================
-    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/${chapter.url.removePrefix("/")}/", rscHeaders)
+    // Page List
+    override fun pageListRequest(chapter: SChapter): Request {
+        val slug = chapter.url.removePrefix("/")
+        return GET("$baseUrl/$slug/", headers)
+    }
 
     override fun pageListParse(response: Response): List<Page> {
-        val data = response.extractNextJs<Images> {
-            val obj = it.jsonObject
-            obj.containsKey("images") || obj.containsKey("data") || obj.containsKey("imageSrc") || obj.containsKey("items")
-        } ?: throw Exception("Gagal memuat gambar")
-
-        return data.images.mapIndexed { i, img ->
-            Page(i, imageUrl = img)
-        }
+        val result = response.extractNextJs<MGKomikImagesDto>()
+        return result?.images?.mapIndexed { index, img ->
+            Page(index, "", img)
+        } ?: emptyList()
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
-    // ======================== Filters ========================
-    override fun getFilterList() = FilterList(
-        SortFilter(),
-        StatusFilter(),
-        TypeFilter(),
-        GenreFilter(getGenreList()),
-    )
-
-    private class SortFilter :
-        Filter.Select<String>(
-            "Urutan",
-            arrayOf("Bawaan", "Terpopuler", "Terbaru", "Update", "A-Z", "Z-A"),
-        ) {
-        val selected get() = arrayOf("", "views", "latest", "update", "title", "titlereverse")[state]
+    override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
     }
 
-    private class StatusFilter :
-        Filter.Select<String>(
-            "Status",
-            arrayOf("Semua", "Ongoing", "Completed"),
-        ) {
-        val selected get() = arrayOf("", "ongoing", "completed")[state]
-    }
-
-    private class TypeFilter :
-        Filter.Select<String>(
-            "Tipe",
-            arrayOf("Semua", "Manga", "Manhwa", "Manhua"),
-        ) {
-        val selected get() = arrayOf("", "manga", "manhwa", "manhua")[state]
-    }
-
-    private class GenreFilter(genres: Array<Pair<String, String>>) :
-        Filter.Group<GenreCheckBox>(
-            "Genre",
-            genres.map { GenreCheckBox(it.first, it.second) },
-        )
-
-    private class GenreCheckBox(name: String, val value: String) : Filter.CheckBox(name)
-
-    private fun getGenreList() = arrayOf(
-        "Action" to "action",
-        "Adventure" to "adventure",
-        "Comedy" to "comedy",
-        "Drama" to "drama",
-        "Ecchi" to "ecchi",
-        "Fantasy" to "fantasy",
-        "Harem" to "harem",
-        "Historical" to "historical",
-        "Horror" to "horror",
-        "Isekai" to "isekai",
-        "Martial Arts" to "martial-arts",
-        "Mature" to "mature",
-        "Mystery" to "mystery",
-        "Psychological" to "psychological",
-        "Romance" to "romance",
-        "School Life" to "school-life",
-        "Sci-fi" to "sci-fi",
-        "Seinen" to "seinen",
-        "Shoujo" to "shoujo",
-        "Shounen" to "shounen",
-        "Slice of Life" to "slice-of-life",
-        "Sports" to "sports",
-        "Supernatural" to "supernatural",
-        "Tragedy" to "tragedy",
-    )
+    override fun getFilterList(): FilterList = FilterList()
 }
