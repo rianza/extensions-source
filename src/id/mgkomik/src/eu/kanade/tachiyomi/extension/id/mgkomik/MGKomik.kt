@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import kotlin.time.Duration.Companion.minutes
 
 class MGKomik : HttpSource() {
     override val name = "MG Komik"
@@ -20,7 +21,11 @@ class MGKomik : HttpSource() {
     override val lang = "id"
     override val supportsLatest = true
 
-    override val client = network.cloudflareClient
+    override val client = network.cloudflareClient.newBuilder()
+        .connectTimeout(2.minutes)
+        .readTimeout(2.minutes)
+        .callTimeout(2.minutes)
+        .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
