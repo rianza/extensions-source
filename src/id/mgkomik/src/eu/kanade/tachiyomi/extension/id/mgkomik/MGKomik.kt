@@ -32,7 +32,12 @@ class MGKomik : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .set("Referer", "$baseUrl/")
 
-    private val dateFormat = SimpleDateFormat("MMMM d, yyyy", Locale("id"))
+    private val dateFormats = listOf(
+        SimpleDateFormat("MMMM d, yyyy", Locale("id")),
+        SimpleDateFormat("d MMMM yyyy", Locale("id")),
+        SimpleDateFormat("MMMM d, yyyy", Locale.US),
+        SimpleDateFormat("d MMMM yyyy", Locale.US),
+    )
 
     override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter()))
 
@@ -45,15 +50,17 @@ class MGKomik : HttpSource() {
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         if (query.isNotBlank()) {
             if (query.startsWith("https://")) {
-                val url = query.toHttpUrl()
-                if (url.host == baseUrl.toHttpUrl().host && url.pathSegments.size > 1 && (url.pathSegments[0] == "komik" || url.pathSegments[0] == "manga")) {
-                    val slug = url.pathSegments[1]
-                    val tmpManga = SManga.create().apply {
-                        this@apply.url = "/komik/$slug"
-                    }
+                val url = runCatching { query.toHttpUrl() }.getOrNull()
+                if (url != null && url.host == baseUrl.toHttpUrl().host && url.pathSegments.isNotEmpty()) {
+                    val slug = url.pathSegments.lastOrNull { it.isNotBlank() }
+                    if (slug != null && (url.pathSegments.contains("komik") || url.pathSegments.contains("manga"))) {
+                        val tmpManga = SManga.create().apply {
+                            this@apply.url = "/komik/$slug"
+                        }
 
-                    return fetchMangaDetails(tmpManga)
-                        .map { MangasPage(listOf(it), false) }
+                        return fetchMangaDetails(tmpManga)
+                            .map { MangasPage(listOf(it), false) }
+                    }
                 }
             }
         }
@@ -96,11 +103,14 @@ class MGKomik : HttpSource() {
 
     override fun searchMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select(".manga-card, a[href*='/komik/']:has(img), .grid a[href*='/komik/']").map { element ->
+
+        val mangas = document.select(".manga-card, a[href*='/komik/']:has(img), .grid a[href*='/komik/'], a:has(h3)").mapNotNull { element ->
+            val link = element.selectFirst("a[href*='/komik/']") ?: if (element.tagName() == "a") element else null
+            if (link == null) return@mapNotNull null
+
             SManga.create().apply {
-                val link = element.selectFirst("a") ?: element
                 setUrlWithoutDomain(link.absUrl("href"))
-                title = element.selectFirst("h3, .title, p")?.text()?.trim() ?: ""
+                title = element.selectFirst("h3, .title, p, .manga-title")?.text()?.trim() ?: ""
                 thumbnail_url = element.selectFirst("img")?.absUrl("src")
             }
         }.filter { it.title.isNotBlank() }.distinctBy { it.url }
@@ -111,7 +121,7 @@ class MGKomik : HttpSource() {
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
 
     override fun getMangaUrl(manga: SManga): String {
-        val slug = manga.url.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
+        val slug = manga.url.trim().removePrefix("/").removePrefix("komik/").removePrefix("manga/").removeSuffix("/")
         return "$baseUrl/komik/$slug"
     }
 
@@ -120,11 +130,12 @@ class MGKomik : HttpSource() {
         return SManga.create().apply {
             title = document.selectFirst("h1, .manga-title, meta[property=og:title]")?.text()
                 ?.removeSuffix(" - MG Komik")?.removeSuffix(" - MGKOMIK")?.trim() ?: ""
-            thumbnail_url = document.selectFirst("img.object-cover, .aspect-video img, [class*=aspect-] img")?.absUrl("src")
-            author = document.selectFirst("span:contains(author:), span:contains(Penulis:) + span, .author")?.text()?.replace("author:", "", true)?.trim()
-            description = document.select("p.line-clamp-4, .prose p, #synopsis p, .sinopsis p, .description").joinToString("\n") { it.text().trim() }
+            thumbnail_url = document.selectFirst("img.object-cover, .aspect-video img, [class*=aspect-] img, .manga-thumbnail img")?.absUrl("src")
+            author = document.selectFirst("span:contains(author:), span:contains(Penulis:) + span, .author, span:contains(Author:)")?.text()
+                ?.replace("author:", "", true)?.replace("Penulis:", "", true)?.trim()
+            description = document.select("p.line-clamp-4, .prose p, #synopsis p, .sinopsis p, .description, .manga-description").joinToString("\n") { it.text().trim() }
 
-            val statusText = document.selectFirst(".bg-gray-100.text-gray-800, .bg-green-100, .bg-blue-100, span:contains(Status:) + span, .status")?.text()?.trim()
+            val statusText = document.selectFirst(".bg-gray-100.text-gray-800, .bg-green-100, .bg-blue-100, span:contains(Status:) + span, .status, .manga-status")?.text()?.trim()
             status = when (statusText?.lowercase()) {
                 "ongoing", "berjalan" -> SManga.ONGOING
                 "selesai", "completed", "tamat" -> SManga.COMPLETED
@@ -132,7 +143,7 @@ class MGKomik : HttpSource() {
                 else -> SManga.UNKNOWN
             }
 
-            genre = document.select(".bg-zinc-700, .bg-zinc-800, a[href*=/genre/], .genre").joinToString { it.text().trim() }
+            genre = document.select(".bg-zinc-700, .bg-zinc-800, a[href*=/genre/], .genre, .manga-genre a").joinToString { it.text().trim() }
         }
     }
 
@@ -140,19 +151,25 @@ class MGKomik : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        return document.select("a[href*='/chapter/'], a[href*='/bab/'], .chapter-list a, .list-chapters a").map { element ->
+        return document.select("a[href*='/chapter/'], a[href*='/bab/'], .chapter-list a, .list-chapters a, .manga-chapters a").map { element ->
             SChapter.create().apply {
                 setUrlWithoutDomain(element.absUrl("href"))
                 name = element.text().trim()
-                date_upload = parseChapterDate(element.selectFirst("span, p")?.text() ?: "")
+                date_upload = parseChapterDate(element.selectFirst("span, p, .chapter-date")?.text() ?: "")
             }
-        }
+        }.distinctBy { it.url }
     }
 
-    private fun parseChapterDate(dateStr: String): Long = try {
-        dateFormat.parse(dateStr.trim())?.time ?: 0L
-    } catch (_: Exception) {
-        0L
+    private fun parseChapterDate(dateStr: String): Long {
+        if (dateStr.isBlank()) return 0L
+        val trimmedDate = dateStr.trim()
+        for (format in dateFormats) {
+            try {
+                return format.parse(trimmedDate)?.time ?: continue
+            } catch (_: Exception) {
+            }
+        }
+        return 0L
     }
 
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), headers)
@@ -165,9 +182,9 @@ class MGKomik : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("img[src*='/uploads/'], .reader-area img").mapIndexed { index, element ->
+        return document.select("img[src*='/uploads/'], .reader-area img, .chapter-content img, .manga-reader img").mapIndexed { index, element ->
             Page(index, imageUrl = element.absUrl("src"))
-        }
+        }.filter { it.imageUrl?.isNotBlank() == true }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
