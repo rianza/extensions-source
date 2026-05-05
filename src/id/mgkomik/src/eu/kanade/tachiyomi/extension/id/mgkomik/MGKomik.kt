@@ -40,7 +40,7 @@ class MGKomik : HttpSource() {
         .set("Referer", "$baseUrl/")
 
     private val rscHeaders = headersBuilder()
-        .set("Rsc", "1")
+        .set("rsc", "1")
         .build()
 
     override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList(SortFilter()))
@@ -162,18 +162,37 @@ class MGKomik : HttpSource() {
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val body = response.body.string().also { cacheGenres(it) }
-        val data = body.extractNextJsRsc<MangaList>()
+        val body = response.peekBody(Long.MAX_VALUE).string()
+        cacheGenres(body)
 
-        val mangas = data?.data.orEmpty().map { it.toSManga() }
-        val hasNextPage = data?.hasNextPage() ?: false
+        val data = body.extractNextJsRsc<MangaList>()
+        val page = response.request.url.queryParameter("page")?.toInt() ?: 1
+
+        val mangas = data?.parseMangas().orEmpty().map { it.toSManga(baseUrl) }
+        val hasNextPage = data?.hasNextPage(page) ?: false
+
+        if (mangas.isEmpty()) {
+            val document = asJsoup(body)
+            val jMangas = document.select("a[href*=/komik/]").map { element ->
+                SManga.create().apply {
+                    setUrlWithoutDomain(element.absUrl("href"))
+                    title = element.selectFirst("h3")?.text() ?: ""
+                    thumbnail_url = element.selectFirst("img")?.absUrl("src")
+                }
+            }
+            if (jMangas.isNotEmpty()) {
+                return MangasPage(jMangas, jMangas.size >= 10)
+            }
+        }
 
         return MangasPage(mangas, hasNextPage)
     }
 
+    private fun asJsoup(html: String): org.jsoup.nodes.Document = org.jsoup.Jsoup.parse(html, baseUrl)
+
     private fun cacheGenres(body: String) {
         val genres = body.extractNextJsRsc<GenreList>()
-            ?.genres
+            ?.parseGenres()
             ?.takeIf { it.isNotEmpty() }
             ?.toJsonString()
             ?: return
@@ -192,7 +211,37 @@ class MGKomik : HttpSource() {
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+        val body = response.body.string()
+        val data = body.extractNextJsRsc<MangaDetailsDto>()
+        if (data != null) {
+            val manga = data.manga ?: data.post ?: data.details ?: data.data ?: data.record
+            if (manga != null) {
+                return manga.toSManga(baseUrl).apply {
+                    val document = asJsoup(body)
+                    author = document.selectFirst("span:contains(author:) + span")?.ownText()?.trim()
+                    genre = buildList {
+                        document.selectFirst("span:contains(type:) + span")
+                            ?.ownText()?.trim()
+                            ?.also { add(it) }
+                        document.selectFirst("span:contains(rilis:) + span")
+                            ?.ownText()?.trim()
+                            ?.also { add(it) }
+                        document.select(".bg-zinc-700").forEach {
+                            add(it.ownText().trim())
+                        }
+                    }.joinToString()
+                    description = document.select("p.line-clamp-4").joinToString("\n") { it.ownText().trim() }
+                    status = when (document.selectFirst(".bg-gray-100.text-gray-800")?.ownText()?.trim()) {
+                        "Ongoing" -> SManga.ONGOING
+                        "Selesai", "Completed" -> SManga.COMPLETED
+                        "Hiatus" -> SManga.ON_HIATUS
+                        else -> SManga.UNKNOWN
+                    }
+                }
+            }
+        }
+
+        val document = asJsoup(body)
 
         return SManga.create().apply {
             val urlPath = document.selectFirst("meta[property=og:url]")?.absUrl("content")?.toHttpUrl()?.pathSegments
@@ -225,9 +274,10 @@ class MGKomik : HttpSource() {
     override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.extractNextJs<ChaptersList>()
+        val body = response.body.string()
+        val data = body.extractNextJsRsc<ChaptersList>()
 
-        return data?.chapters.orEmpty().map { it.toSChapter() }
+        return data?.parseChapters().orEmpty().map { it.toSChapter() }
     }
 
     override fun pageListRequest(chapter: SChapter): Request = GET(getChapterUrl(chapter), rscHeaders)
@@ -239,9 +289,10 @@ class MGKomik : HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val data = response.extractNextJs<Images>()
+        val body = response.body.string()
+        val data = body.extractNextJsRsc<Images>()
 
-        return data?.images.orEmpty().mapIndexed { index, img ->
+        return data?.parseImages().orEmpty().mapIndexed { index, img ->
             Page(
                 index,
                 imageUrl = img,
