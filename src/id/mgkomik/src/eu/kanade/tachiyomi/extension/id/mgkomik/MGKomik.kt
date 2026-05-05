@@ -37,10 +37,11 @@ class MGKomik : HttpSource() {
     // ======================== Popular ========================
     override fun popularMangaRequest(page: Int): Request {
         val url = "$baseUrl/komik/".toHttpUrl().newBuilder()
+            .addQueryParameter("filter", "")
             .addQueryParameter("order_by", "views")
             .addQueryParameter("page", page.toString())
             .build()
-        return GET(url, rscHeaders)
+        return GET(url, headers)
     }
 
     override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
@@ -48,10 +49,11 @@ class MGKomik : HttpSource() {
     // ======================== Latest ========================
     override fun latestUpdatesRequest(page: Int): Request {
         val url = "$baseUrl/komik/".toHttpUrl().newBuilder()
+            .addQueryParameter("filter", "")
             .addQueryParameter("order_by", "latest")
             .addQueryParameter("page", page.toString())
             .build()
-        return GET(url, rscHeaders)
+        return GET(url, headers)
     }
 
     override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
@@ -63,7 +65,7 @@ class MGKomik : HttpSource() {
                 .addQueryParameter("q", query)
                 .addQueryParameter("page", page.toString())
                 .build()
-            return GET(url, rscHeaders)
+            return GET(url, headers)
         }
 
         val url = "$baseUrl/komik/".toHttpUrl().newBuilder()
@@ -83,13 +85,14 @@ class MGKomik : HttpSource() {
             }
         }
 
-        return GET(url.build(), rscHeaders)
+        return GET(url.build(), headers)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
         val data = response.extractNextJs<MangaList> {
             val obj = it.jsonObject
-            obj.containsKey("data") || obj.containsKey("records") || obj.containsKey("items")
+            (obj.containsKey("data") || obj.containsKey("records") || obj.containsKey("items")) &&
+                (obj.containsKey("current_page") || obj.containsKey("page"))
         } ?: throw Exception("Gagal memuat daftar komik")
 
         val mangas = data.data.map { it.toSManga() }
@@ -101,7 +104,7 @@ class MGKomik : HttpSource() {
 
     override fun getMangaUrl(manga: SManga): String {
         val slug = manga.url.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
-        return "$baseUrl/komik/$slug"
+        return "$baseUrl/komik/$slug/"
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
@@ -109,13 +112,13 @@ class MGKomik : HttpSource() {
             ?: throw Exception("Gagal memuat detail komik")
 
         return SManga.create().apply {
-            val slug = response.request.url.pathSegments.lastOrNull()
+            val slug = response.request.url.pathSegments.getOrNull(response.request.url.pathSegments.size - 2)
             url = slug?.removePrefix("/").orEmpty().removePrefix("komik/").removePrefix("manga/")
-            title = data.title
-            thumbnail_url = data.img ?: data.image ?: data.thumbnail
+            title = data.title ?: data.name ?: ""
+            thumbnail_url = data.img ?: data.image ?: data.thumbnail ?: data.cover
             author = data.author
             description = data.description ?: data.sinopsis
-            genre = data.genres?.joinToString { it.title }
+            genre = (data.genres?.mapNotNull { it.title ?: it.name } ?: data.genresAlt)?.joinToString()
             status = when (data.status?.lowercase()) {
                 "ongoing" -> SManga.ONGOING
                 "completed", "tamat" -> SManga.COMPLETED
@@ -136,11 +139,11 @@ class MGKomik : HttpSource() {
     }
 
     // ======================== Pages ========================
-    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/${chapter.url}", rscHeaders)
+    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/${chapter.url.removePrefix("/")}/", rscHeaders)
 
     override fun pageListParse(response: Response): List<Page> {
         val data = response.extractNextJs<Images> {
-            it.jsonObject.containsKey("images") || it.jsonObject.containsKey("data")
+            it.jsonObject.containsKey("images") || it.jsonObject.containsKey("data") || it.jsonObject.containsKey("imageSrc")
         } ?: throw Exception("Gagal memuat gambar")
 
         return data.images.mapIndexed { i, img ->
