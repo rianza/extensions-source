@@ -1,101 +1,210 @@
 package eu.kanade.tachiyomi.extension.id.mgkomik
 
-import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import java.text.SimpleDateFormat
-import java.util.Locale
+import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.utils.extractNextJs
+import keiyoushi.utils.extractNextJsRsc
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Request
+import okhttp3.Response
 
-class MGKomik :
-    Madara(
-        "MG Komik",
-        "https://id.mgkomik.cc",
-        "id",
-        SimpleDateFormat("dd MMM yy", Locale.US),
-    ) {
-    override val useLoadMoreRequest = LoadMoreStrategy.Always
+class MGKomik : HttpSource() {
+    override val name = "MG Komik"
+    override val baseUrl = "https://web.mgkomik.cc"
+    override val lang = "id"
+    override val supportsLatest = true
 
-    override val useNewChapterEndpoint = false
+    override val client = network.cloudflareClient
 
-    override val mangaSubString = "komik"
+    override fun headersBuilder() = super.headersBuilder()
+        .set("Referer", "$baseUrl/")
 
-    override fun headersBuilder() = super.headersBuilder().apply {
-        set("Sec-Fetch-Site", "same-origin")
-        set("Upgrade-Insecure-Requests", "1")
-        set("Referer", "$baseUrl/")
-        set("Sec-Fetch-Site", "none")
-    }
-
-    override val client = network.cloudflareClient.newBuilder()
-        .addInterceptor { chain ->
-            val request = chain.request()
-            val headers = request.headers.newBuilder().apply {
-                removeAll("X-Requested-With")
-            }.build()
-
-            chain.proceed(request.newBuilder().headers(headers).build())
-        }
-        .rateLimit(9, 2)
+    private val rscHeaders = headersBuilder()
+        .set("rsc", "1")
         .build()
 
-    // ================================== Popular ======================================
+    // ======================== Popular ========================
+    override fun popularMangaRequest(page: Int): Request {
+        val url = "$baseUrl/list".toHttpUrl().newBuilder()
+            .addQueryParameter("order_by", "views")
+            .addQueryParameter("page", page.toString())
+            .build()
+        return GET(url, rscHeaders)
+    }
 
-    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
-        element.select("div.item-thumb a").let {
-            setUrlWithoutDomain(it.attr("abs:href"))
-            title = it.attr("title")
-            thumbnail_url = it.select("img").attr("abs:src")
+    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
+
+    // ======================== Latest ========================
+    override fun latestUpdatesRequest(page: Int): Request {
+        val url = "$baseUrl/list".toHttpUrl().newBuilder()
+            .addQueryParameter("order_by", "latest")
+            .addQueryParameter("page", page.toString())
+            .build()
+        return GET(url, rscHeaders)
+    }
+
+    override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
+
+    // ======================== Search ========================
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        if (query.isNotEmpty()) {
+            val url = "$baseUrl/list".toHttpUrl().newBuilder()
+                .addQueryParameter("q", query)
+                .addQueryParameter("page", page.toString())
+                .build()
+            return GET(url, rscHeaders)
+        }
+
+        val url = "$baseUrl/list".toHttpUrl().newBuilder()
+        url.addQueryParameter("page", page.toString())
+
+        filters.forEach { filter ->
+            when (filter) {
+                is SortFilter -> url.addQueryParameter("order_by", filter.selected)
+                is StatusFilter -> url.addQueryParameter("status", filter.selected)
+                is TypeFilter -> url.addQueryParameter("type", filter.selected)
+                is GenreFilter -> {
+                    filter.state
+                        .filter { it.state }
+                        .forEach { url.addQueryParameter("genre[]", it.value) }
+                }
+                else -> {}
+            }
+        }
+
+        return GET(url.build(), rscHeaders)
+    }
+
+    override fun searchMangaParse(response: Response): MangasPage {
+        val data = response.body.string().extractNextJsRsc<MangaList>()
+            ?: throw Exception("Gagal memuat daftar komik")
+
+        val mangas = data.data.map { it.toSManga() }
+        return MangasPage(mangas, data.hasNextPage())
+    }
+
+    // ======================== Details ========================
+    override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), headers)
+
+    override fun getMangaUrl(manga: SManga): String {
+        val slug = manga.url.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
+        return "$baseUrl/komik/$slug"
+    }
+
+    override fun mangaDetailsParse(response: Response): SManga {
+        val data = response.extractNextJs<MangaDetails>()
+            ?: throw Exception("Gagal memuat detail komik")
+
+        return SManga.create().apply {
+            val slug = response.request.url.pathSegments.lastOrNull()
+            url = slug?.removePrefix("/").orEmpty().removePrefix("komik/").removePrefix("manga/")
+            title = data.title
+            thumbnail_url = data.img
+            author = data.author
+            description = data.description
+            genre = data.genres?.joinToString { it.title }
+            status = when (data.status?.lowercase()) {
+                "ongoing" -> SManga.ONGOING
+                "completed", "tamat" -> SManga.COMPLETED
+                else -> SManga.UNKNOWN
+            }
         }
     }
 
-    // ================================ Chapters ================================
+    // ======================== Chapters ========================
+    override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
 
-    override val chapterUrlSuffix = ""
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val data = response.body.string().extractNextJsRsc<ChaptersList>()
+            ?: throw Exception("Gagal memuat daftar chapter")
 
-    // ================================ Filters ================================
-
-    override fun getFilterList(): FilterList {
-        launchIO { fetchGenres() }
-
-        val filters = super.getFilterList().list.toMutableList()
-
-        filters += if (genresList.isNotEmpty()) {
-            listOf(
-                Filter.Separator(),
-                GenreContentFilter(
-                    title = intl["genre_filter_title"],
-                    options = genresList.map { it.name to it.id },
-                ),
-            )
-        } else {
-            listOf(
-                Filter.Separator(),
-                Filter.Header(intl["genre_missing_warning"]),
-            )
-        }
-
-        return FilterList(filters)
+        return data.chapters.map { it.toSChapter() }
     }
 
-    private class GenreContentFilter(title: String, options: List<Pair<String, String>>) :
-        UriPartFilter(
-            title,
-            options.toTypedArray(),
+    // ======================== Pages ========================
+    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/${chapter.url}", rscHeaders)
+
+    override fun pageListParse(response: Response): List<Page> {
+        val data = response.body.string().extractNextJsRsc<Images>()
+            ?: throw Exception("Gagal memuat gambar")
+
+        return data.images.mapIndexed { i, img ->
+            Page(i, imageUrl = img)
+        }
+    }
+
+    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+
+    // ======================== Filters ========================
+    override fun getFilterList() = FilterList(
+        SortFilter(),
+        StatusFilter(),
+        TypeFilter(),
+        GenreFilter(getGenreList()),
+    )
+
+    private class SortFilter :
+        Filter.Select<String>(
+            "Urutan",
+            arrayOf("Bawaan", "Terpopuler", "Terbaru", "A-Z", "Z-A"),
+        ) {
+        val selected get() = arrayOf("", "views", "latest", "title", "titlereverse")[state]
+    }
+
+    private class StatusFilter :
+        Filter.Select<String>(
+            "Status",
+            arrayOf("Semua", "Ongoing", "Completed"),
+        ) {
+        val selected get() = arrayOf("", "ongoing", "completed")[state]
+    }
+
+    private class TypeFilter :
+        Filter.Select<String>(
+            "Tipe",
+            arrayOf("Semua", "Manga", "Manhwa", "Manhua"),
+        ) {
+        val selected get() = arrayOf("", "manga", "manhwa", "manhua")[state]
+    }
+
+    private class GenreFilter(genres: Array<Pair<String, String>>) :
+        Filter.Group<GenreCheckBox>(
+            "Genre",
+            genres.map { GenreCheckBox(it.first, it.second) },
         )
 
-    override fun genresRequest() = GET("$baseUrl/$mangaSubString", headers)
+    private class GenreCheckBox(name: String, val value: String) : Filter.CheckBox(name)
 
-    override fun parseGenres(document: Document): List<Genre> {
-        val genres = mutableListOf<Genre>()
-        genres += Genre("All", "")
-        genres += document.select(".row.genres li a").map { a ->
-            Genre(a.text(), a.absUrl("href"))
-        }
-        return genres
-    }
+    private fun getGenreList() = arrayOf(
+        "Action" to "action",
+        "Adventure" to "adventure",
+        "Comedy" to "comedy",
+        "Drama" to "drama",
+        "Ecchi" to "ecchi",
+        "Fantasy" to "fantasy",
+        "Harem" to "harem",
+        "Historical" to "historical",
+        "Horror" to "horror",
+        "Isekai" to "isekai",
+        "Martial Arts" to "martial-arts",
+        "Mature" to "mature",
+        "Mystery" to "mystery",
+        "Psychological" to "psychological",
+        "Romance" to "romance",
+        "School Life" to "school-life",
+        "Sci-fi" to "sci-fi",
+        "Seinen" to "seinen",
+        "Shoujo" to "shoujo",
+        "Shounen" to "shounen",
+        "Slice of Life" to "slice-of-life",
+        "Sports" to "sports",
+        "Supernatural" to "supernatural",
+        "Tragedy" to "tragedy",
+    )
 }
