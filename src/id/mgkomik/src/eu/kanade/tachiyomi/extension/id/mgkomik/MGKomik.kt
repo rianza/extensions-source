@@ -15,6 +15,8 @@ import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.extractNextJsRsc
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -161,11 +163,22 @@ class MGKomik : HttpSource() {
         return FilterList(filters)
     }
 
+    private inline fun <reified T> Response.extractData(noinline predicate: (JsonElement) -> Boolean): T? {
+        val bodyString = body.string()
+        return if (header("Content-Type")?.contains("text/x-component") == true) {
+            bodyString.extractNextJsRsc(predicate)
+        } else {
+            asJsoup(bodyString).extractNextJs(predicate)
+        }
+    }
+
     override fun searchMangaParse(response: Response): MangasPage {
         val body = response.peekBody(Long.MAX_VALUE).string()
         cacheGenres(body)
 
-        val data = body.extractNextJsRsc<MangaList>()
+        val data = response.extractData<MangaList> {
+            it is JsonObject && (it.containsKey("records") || it.containsKey("data") || it.containsKey("mangas") || it.containsKey("posts"))
+        }
         val page = response.request.url.queryParameter("page")?.toInt() ?: 1
 
         val mangas = data?.parseMangas().orEmpty().map { it.toSManga(baseUrl) }
@@ -191,8 +204,9 @@ class MGKomik : HttpSource() {
     private fun asJsoup(html: String): org.jsoup.nodes.Document = org.jsoup.Jsoup.parse(html, baseUrl)
 
     private fun cacheGenres(body: String) {
-        val genres = body.extractNextJsRsc<GenreList>()
-            ?.parseGenres()
+        val genres = body.extractNextJsRsc<GenreList> {
+            it is JsonObject && (it.containsKey("genres") || it.containsKey("data"))
+        }?.parseGenres()
             ?.takeIf { it.isNotEmpty() }
             ?.toJsonString()
             ?: return
@@ -204,38 +218,48 @@ class MGKomik : HttpSource() {
 
     override fun mangaDetailsRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
 
-    override fun getMangaUrl(manga: SManga): String = if (manga.url.startsWith("/komik/")) {
-        baseUrl + manga.url
-    } else {
-        "$baseUrl/komik/${manga.url.removePrefix("/")}"
+    override fun getMangaUrl(manga: SManga): String {
+        val slug = manga.url.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
+        return "$baseUrl/komik/$slug"
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val body = response.body.string()
-        val data = body.extractNextJsRsc<MangaDetailsDto>()
+        val body = response.peekBody(Long.MAX_VALUE).string()
+        val data = response.extractData<MangaDetailsDto> {
+            it is JsonObject && (it.containsKey("manga") || it.containsKey("post") || it.containsKey("details") || it.containsKey("record"))
+        }
+
         if (data != null) {
             val manga = data.manga ?: data.post ?: data.details ?: data.data ?: data.record
             if (manga != null) {
                 return manga.toSManga(baseUrl).apply {
                     val document = asJsoup(body)
-                    author = document.selectFirst("span:contains(author:) + span")?.ownText()?.trim()
-                    genre = buildList {
-                        document.selectFirst("span:contains(type:) + span")
-                            ?.ownText()?.trim()
-                            ?.also { add(it) }
-                        document.selectFirst("span:contains(rilis:) + span")
-                            ?.ownText()?.trim()
-                            ?.also { add(it) }
-                        document.select(".bg-zinc-700").forEach {
-                            add(it.ownText().trim())
+                    if (author.isNullOrBlank()) {
+                        author = document.selectFirst("span:contains(author:) + span")?.ownText()?.trim()
+                    }
+                    if (genre.isNullOrBlank()) {
+                        genre = buildList {
+                            document.selectFirst("span:contains(type:) + span")
+                                ?.ownText()?.trim()
+                                ?.also { add(it) }
+                            document.selectFirst("span:contains(rilis:) + span")
+                                ?.ownText()?.trim()
+                                ?.also { add(it) }
+                            document.select(".bg-zinc-700").forEach {
+                                add(it.ownText().trim())
+                            }
+                        }.joinToString()
+                    }
+                    if (description.isNullOrBlank()) {
+                        description = document.select("p.line-clamp-4").joinToString("\n") { it.ownText().trim() }
+                    }
+                    if (status == SManga.UNKNOWN) {
+                        status = when (document.selectFirst(".bg-gray-100.text-gray-800")?.ownText()?.trim()) {
+                            "Ongoing" -> SManga.ONGOING
+                            "Selesai", "Completed" -> SManga.COMPLETED
+                            "Hiatus" -> SManga.ON_HIATUS
+                            else -> SManga.UNKNOWN
                         }
-                    }.joinToString()
-                    description = document.select("p.line-clamp-4").joinToString("\n") { it.ownText().trim() }
-                    status = when (document.selectFirst(".bg-gray-100.text-gray-800")?.ownText()?.trim()) {
-                        "Ongoing" -> SManga.ONGOING
-                        "Selesai", "Completed" -> SManga.COMPLETED
-                        "Hiatus" -> SManga.ON_HIATUS
-                        else -> SManga.UNKNOWN
                     }
                 }
             }
@@ -274,8 +298,9 @@ class MGKomik : HttpSource() {
     override fun chapterListRequest(manga: SManga): Request = GET(getMangaUrl(manga), rscHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val body = response.body.string()
-        val data = body.extractNextJsRsc<ChaptersList>()
+        val data = response.extractData<ChaptersList> {
+            it is JsonObject && (it.containsKey("chapters") || it.containsKey("data") || it.containsKey("items"))
+        }
 
         return data?.parseChapters().orEmpty().map { it.toSChapter() }
     }
@@ -289,8 +314,9 @@ class MGKomik : HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val body = response.body.string()
-        val data = body.extractNextJsRsc<Images>()
+        val data = response.extractData<Images> {
+            it is JsonObject && (it.containsKey("images") || it.containsKey("data") || it.containsKey("items"))
+        }
 
         return data?.parseImages().orEmpty().mapIndexed { index, img ->
             Page(

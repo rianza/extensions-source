@@ -40,6 +40,17 @@ class MangaList(
         val thumb: String? = null,
         val cover: String? = null,
         val gambar: String? = null,
+        val author: String? = null,
+        @SerialName("author_name")
+        val authorName: String? = null,
+        val description: String? = null,
+        val synopsis: String? = null,
+        val summary: String? = null,
+        val content: String? = null,
+        val status: String? = null,
+        val type: String? = null,
+        val genre: String? = null,
+        val genres: List<Genre>? = null,
     ) {
         fun toSManga(baseUrl: String) = SManga.create().apply {
             val rawUrl = link ?: slug ?: url ?: tautan ?: ""
@@ -48,7 +59,9 @@ class MangaList(
             } else {
                 rawUrl
             }.let {
-                if (it.contains("/komik/") || it.isEmpty()) it else "/komik/${it.removePrefix("/")}"
+                it.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
+            }.let {
+                "/komik/$it"
             }
             this.title = (this@Manga.title ?: name ?: judul ?: "").trim()
             val rawImg = img ?: image ?: thumbnail ?: thumb ?: cover ?: gambar ?: ""
@@ -56,6 +69,15 @@ class MangaList(
                 rawImg.isEmpty() -> ""
                 rawImg.startsWith("/") -> baseUrl + rawImg
                 else -> rawImg
+            }
+            author = (this@Manga.author ?: authorName)?.trim()
+            description = (this@Manga.description ?: synopsis ?: summary ?: content)?.trim()
+            genre = (genres?.joinToString { it.title } ?: this@Manga.genre ?: type)?.trim()
+            status = when (this@Manga.status?.lowercase()) {
+                "ongoing" -> SManga.ONGOING
+                "completed", "selesai" -> SManga.COMPLETED
+                "hiatus" -> SManga.ON_HIATUS
+                else -> SManga.UNKNOWN
             }
         }
     }
@@ -114,6 +136,8 @@ class ChaptersList(
                 runCatching { rawUrl.toHttpUrl().encodedPath }.getOrDefault(rawUrl)
             } else {
                 rawUrl
+            }.let {
+                if (it.startsWith("/")) it else "/$it"
             }
             this.name = (this@Chapter.title ?: this@Chapter.name ?: judul ?: "").trim()
             date_upload = dateFormat.tryParse(updatedAt ?: createdAt)
