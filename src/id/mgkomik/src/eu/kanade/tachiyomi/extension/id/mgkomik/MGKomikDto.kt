@@ -24,6 +24,8 @@ class MangaList(
     private val _results: List<Manga>? = null,
     @SerialName("entry")
     private val _entry: List<Manga>? = null,
+    @SerialName("item")
+    private val _item: List<Manga>? = null,
 
     @SerialName("current_page")
     private val currentPage: Int? = null,
@@ -34,12 +36,13 @@ class MangaList(
     @SerialName("total_pages")
     private val totalPages: Int? = null,
 ) {
-    val data: List<Manga> get() = _data ?: _records ?: _items ?: _entries ?: _result ?: _results ?: _entry ?: emptyList()
+    val data: List<Manga> get() = _data ?: _records ?: _items ?: _entries ?: _result ?: _results ?: _entry ?: _item ?: emptyList()
 
     @Serializable
     class Manga(
         val link: String? = null,
         val slug: String? = null,
+        val url: String? = null,
         val title: String? = null,
         val name: String? = null,
         val img: String? = null,
@@ -48,8 +51,8 @@ class MangaList(
         val cover: String? = null,
     ) {
         fun toSManga() = SManga.create().apply {
-            val rawUrl = link ?: slug ?: ""
-            url = rawUrl.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
+            val rawUrl = link ?: slug ?: url ?: ""
+            this.url = rawUrl.removePrefix("/").removePrefix("komik/").removePrefix("manga/")
             title = this@Manga.title ?: this@Manga.name ?: ""
             thumbnail_url = img ?: image ?: thumbnail ?: cover
         }
@@ -71,6 +74,7 @@ class MangaDetails(
     val thumbnail: String? = null,
     val cover: String? = null,
     val author: String? = null,
+    val authorName: String? = null,
     val description: String? = null,
     val sinopsis: String? = null,
     val status: String? = null,
@@ -95,13 +99,16 @@ class ChaptersList(
     private val _data: List<Chapter>? = null,
     @SerialName("records")
     private val _records: List<Chapter>? = null,
+    @SerialName("items")
+    private val _items: List<Chapter>? = null,
 ) {
-    val chapters: List<Chapter> get() = _chapters ?: _data ?: _records ?: emptyList()
+    val chapters: List<Chapter> get() = _chapters ?: _data ?: _records ?: _items ?: emptyList()
 
     @Serializable
     class Chapter(
         val link: String? = null,
         val slug: String? = null,
+        val url: String? = null,
         val title: String? = null,
         val name: String? = null,
         @SerialName("created_at")
@@ -110,8 +117,8 @@ class ChaptersList(
         val updatedAt: String? = null,
     ) {
         fun toSChapter() = SChapter.create().apply {
-            val rawUrl = link ?: slug ?: ""
-            url = rawUrl.removePrefix("/")
+            val rawUrl = link ?: slug ?: url ?: ""
+            this.url = rawUrl.removePrefix("/")
             name = this@Chapter.title ?: this@Chapter.name ?: ""
             date_upload = dateFormat.tryParse(updatedAt ?: createdAt)
         }
@@ -128,6 +135,8 @@ class Images(
     private val _data: List<String>? = null,
     @SerialName("imageSrc")
     private val _imageSrc: List<String>? = null,
+    @SerialName("items")
+    private val _items: List<String>? = null,
 ) {
-    val images: List<String> get() = _images ?: _data ?: _imageSrc ?: emptyList()
+    val images: List<String> get() = _images ?: _data ?: _imageSrc ?: _items ?: emptyList()
 }
