@@ -40,13 +40,3 @@ class SortFilter :
             "A-Z" to "alphabet",
         ),
     )
-
-class GenreFilter(genres: List<Genre>) :
-    Filter.Group<GenreCheckBox>(
-        "Genre",
-        genres.map { GenreCheckBox(it.title, it.link) },
-    ) {
-    val checked get() = state.filter { it.state }.map { it.value }
-}
-
-class GenreCheckBox(name: String, val value: String) : Filter.CheckBox(name)

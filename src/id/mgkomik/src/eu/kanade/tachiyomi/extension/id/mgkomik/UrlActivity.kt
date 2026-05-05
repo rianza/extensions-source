@@ -5,15 +5,17 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import kotlin.system.exitProcess
 
 class UrlActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val pathSegments = intent.data?.pathSegments
+
+        val pathSegments = intent?.data?.pathSegments
         if (pathSegments != null && pathSegments.size > 1) {
             val intent = Intent().apply {
                 action = "eu.kanade.tachiyomi.SEARCH"
-                putExtra("query", "https://web.mgkomik.cc/komik/${pathSegments[1]}")
+                putExtra("query", "${intent.data}")
                 putExtra("filter", packageName)
             }
 
@@ -23,9 +25,10 @@ class UrlActivity : Activity() {
                 Log.e("UrlActivity", e.toString())
             }
         } else {
-            Log.e("UrlActivity", "could not parse: ${intent.data}")
+            Log.e("UrlActivity", "could not parse $intent")
         }
 
         finish()
+        exitProcess(0)
     }
 }
