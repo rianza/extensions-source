@@ -14,9 +14,9 @@ import java.util.Locale
 class MGKomik :
     Madara(
         "MG Komik",
-        "https://id.mgkomik.cc",
+        "https://web.mgkomik.cc",
         "id",
-        SimpleDateFormat("dd MMM yy", Locale.US),
+        SimpleDateFormat("dd MMM yy", Locale("id")),
     ) {
     override val useLoadMoreRequest = LoadMoreStrategy.Always
 
@@ -28,54 +28,48 @@ class MGKomik :
         set("Sec-Fetch-Site", "same-origin")
         set("Upgrade-Insecure-Requests", "1")
         set("Referer", "$baseUrl/")
-        set("Sec-Fetch-Site", "none")
     }
 
     override val client = network.cloudflareClient.newBuilder()
         .addInterceptor { chain ->
             val request = chain.request()
             val headers = request.headers.newBuilder().apply {
-                removeAll("X-Requested-With")
+                if (request.header("X-Requested-With") == null && request.url.encodedPath.contains("admin-ajax.php")) {
+                    set("X-Requested-With", "XMLHttpRequest")
+                }
             }.build()
 
             chain.proceed(request.newBuilder().headers(headers).build())
         }
-        .rateLimit(9, 2)
+        .rateLimit(4, 1)
         .build()
 
-    // ================================== Popular ======================================
-
+    // Popular
     override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
-        element.select("div.item-thumb a").let {
-            setUrlWithoutDomain(it.attr("abs:href"))
-            title = it.attr("title")
-            thumbnail_url = it.select("img").attr("abs:src")
+        val titleElement = element.selectFirst("div.post-title a, h3 a, a")
+        setUrlWithoutDomain(titleElement!!.attr("abs:href"))
+        title = titleElement.attr("title").ifBlank { titleElement.text() }
+        thumbnail_url = element.selectFirst("img")?.let {
+            it.attr("abs:src").ifBlank { it.attr("abs:data-src") }
         }
     }
 
-    // ================================ Chapters ================================
+    // Latest
+    override fun latestUpdatesFromElement(element: Element): SManga = popularMangaFromElement(element)
 
-    override val chapterUrlSuffix = ""
-
-    // ================================ Filters ================================
-
+    // Filters
     override fun getFilterList(): FilterList {
         launchIO { fetchGenres() }
 
         val filters = super.getFilterList().list.toMutableList()
 
-        filters += if (genresList.isNotEmpty()) {
-            listOf(
+        if (genresList.isNotEmpty()) {
+            filters += listOf(
                 Filter.Separator(),
                 GenreContentFilter(
                     title = intl["genre_filter_title"],
                     options = genresList.map { it.name to it.id },
                 ),
-            )
-        } else {
-            listOf(
-                Filter.Separator(),
-                Filter.Header(intl["genre_missing_warning"]),
             )
         }
 
@@ -93,8 +87,12 @@ class MGKomik :
     override fun parseGenres(document: Document): List<Genre> {
         val genres = mutableListOf<Genre>()
         genres += Genre("All", "")
-        genres += document.select(".row.genres li a").map { a ->
-            Genre(a.text(), a.absUrl("href"))
+        genres += document.select(".row.genres li a, .genrez li label").map { a ->
+            if (a.tagName() == "label") {
+                Genre(a.text(), a.parent()?.selectFirst("input")?.attr("value") ?: "")
+            } else {
+                Genre(a.text(), a.absUrl("href"))
+            }
         }
         return genres
     }
