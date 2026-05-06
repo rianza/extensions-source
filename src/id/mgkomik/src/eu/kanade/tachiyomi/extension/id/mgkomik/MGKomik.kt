@@ -80,11 +80,12 @@ class MGKomik : HttpSource() {
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val data = response.extractNextJs<MangaList>()
-            ?: throw Exception("Could not find manga list data")
+        val data = response.extractNextJs<MangaList> {
+            it.toString().contains("title") && it.toString().contains("slug")
+        } ?: throw Exception("Could not find manga list data")
 
         val page = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
-        val mangas = data.records.map { it.toSManga() }
+        val mangas = data.toMangas().map { it.toSManga() }
         return MangasPage(mangas, data.hasNextPage(page))
     }
 
@@ -92,10 +93,11 @@ class MGKomik : HttpSource() {
     override fun mangaDetailsRequest(manga: SManga): Request = GET("$baseUrl/komik/${manga.url}", rscHeaders)
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val data = response.extractNextJs<MangaDetails>()
-            ?: throw Exception("Could not find manga details")
+        val data = response.extractNextJs<MangaDetails> {
+            it.toString().contains("title") && it.toString().contains("synopsis")
+        } ?: throw Exception("Could not find manga details")
 
-        return data.manga.toSManga()
+        return data.toMangaData().toSManga()
     }
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/komik/${manga.url}"
@@ -104,22 +106,24 @@ class MGKomik : HttpSource() {
     override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.extractNextJs<ChaptersData>()
-            ?: throw Exception("Could not find chapters data")
+        val data = response.extractNextJs<ChaptersData> {
+            it.toString().contains("chapters") || it.toString().contains("chapterNumber")
+        } ?: throw Exception("Could not find chapters data")
 
         val mangaSlug = response.request.url.pathSegments.last()
 
-        return data.chapters.map { it.toSChapter(mangaSlug) }
+        return data.toChapterList().map { it.toSChapter(mangaSlug) }
     }
 
     // ======================== Pages ========================
     override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl${chapter.url}", rscHeaders)
 
     override fun pageListParse(response: Response): List<Page> {
-        val data = response.extractNextJs<PageData>()
-            ?: throw Exception("Could not find page data")
+        val data = response.extractNextJs<PageData> {
+            it.toString().contains("images") || (it.toString().contains("data") && it.toString().contains("http"))
+        } ?: throw Exception("Could not find page data")
 
-        return data.images.mapIndexed { i, img ->
+        return data.toImageList().mapIndexed { i, img ->
             Page(i, imageUrl = img)
         }
     }
